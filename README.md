@@ -1,6 +1,7 @@
-# NAME: RAKSHITHA K
-# REGISTER NUMBER: 212223110039
 # INTERFACING TEMPERATURE SENSOR WITH IOT CONTROLLER AND UPLOADING DATA TO THE CLOUD VIA LORAWAN
+
+# Name: RAKSHITHA K
+# RegNo: 212223110039
 
 # AIM:
 To upload the temperature sensor value in the Things mate using Arduino controller.
@@ -81,72 +82,204 @@ Update rate: 1 Hz (one reading per second)</br>
 ![DHT11-Sensor](https://github.com/user-attachments/assets/69e4670d-6116-4cab-b905-941169d913a5)
 
 # PROGRAM:
-~~~
-#include "ThingSpeak.h"
-#include <WiFi.h>
-#include "DHT.h"
+```
+#include <SoftwareSerial.h>
+#include <Adafruit_Sensor.h>
+#include <DHT.h>
+#include <DHT_U.h>
 
-char ssid[] = "Vinuthaa";
-char pass[] = "iwillnotsay";
+#define DHTPIN 9                 // Digital pin connected to the DHT sensor 
+#define DHTTYPE    DHT11         // DHT 11
 
-const int out = 2;
-long T;
-float temperature = 0;
-WiFiClient client;
-DHT dht(out, DHT11);
+DHT_Unified dht(DHTPIN, DHTTYPE);
+SoftwareSerial ss(10, 11);       // Arduino RX, TX ,
 
-unsigned long myChannelField =  3108847;
-const int TemperatureField = 1;
-const int HumidityField = 2; 
-const char* myWriteAPIKey = "EO0EK0I4E0LMIPDM";
+String inputString = "";         // a String to hold incoming data
+bool stringComplete = false;     // whether the string is complete
+long old_time=millis();
+long new_time;
+long uplink_interval=30000;      //ms
+bool time_to_at_recvb=false;
+bool get_LA66_data_status=false;
+bool network_joined_status=false;
+float DHT11_temp;
+float DHT11_hum;
+char rxbuff[128];
+uint8_t rxbuff_index=0;
 
 void setup() {
-  Serial.begin(115200);
-  ThingSpeak.begin(client);
-  WiFi.mode(WIFI_STA);
+  // initialize serial
+  Serial.begin(9600);
+   ss.begin(9600);
+  ss.listen();
+  // reserve 200 bytes for the inputString:
+  inputString.reserve(200);
   dht.begin();
-  pinMode(out, INPUT);
-  // put your setup code here, to run once:
-
+  sensor_t sensor;
+  dht.temperature().getSensor(&sensor);
+  dht.humidity().getSensor(&sensor);
+   ss.println("ATZ");//reset LA66
 }
 
-void loop() 
-{
-  if (WiFi.status() != WL_CONNECTED)
-  {
-    Serial.print("Attempting to conenct to SSID: ");
-    Serial.println(ssid);
-    while (WiFi.status() != WL_CONNECTED)
-    {
-      WiFi.begin(ssid, pass);
-      Serial.print(".");
-      delay(5000);
+void loop() {
+  new_time = millis();
+
+  if((new_time-old_time>=uplink_interval)&&(network_joined_status==1)){
+    old_time = new_time;
+    get_LA66_data_status=false;
+
+  // Get temperature event and print its value.
+  sensors_event_t event;
+  dht.temperature().getEvent(&event);
+  if (isnan(event.temperature)) {
+    Serial.println(F("Error reading temperature!"));
+    DHT11_temp=327.67;
+  }
+  else {
+    DHT11_temp=event.temperature;
+    
+    if(DHT11_temp>60){
+      DHT11_temp=60;
     }
-    Serial.println("\nConnected.");
+    else if(DHT11_temp<-20){
+      DHT11_temp=-20;
+    }
+  }
+ 
+ // Get humidity event and print its value.
+  dht.humidity().getEvent(&event);
+  if (isnan(event.relative_humidity)) {
+    DHT11_hum=327.67;
+    Serial.println(F("Error reading humidity!"));
+  }
+  else {
+    DHT11_hum=event.relative_humidity;
+    
+    if(DHT11_hum>100){
+      DHT11_hum=100;
+    }
+    else if(DHT11_hum<0){
+      DHT11_hum=0;
+    }
   }
 
-  float temperature = dht.readTemperature();
-  float humidity = dht.readHumidity();
+    Serial.print(F("Temperature: "));
+    Serial.print(DHT11_temp);
+    Serial.println(F("°C"));
+    Serial.print(F("Humidity: "));
+    Serial.print(DHT11_hum);
+    Serial.println(F("%"));
+    
+    char sensor_data_buff[128]="\0";
 
-  Serial.print("Temperature: ");
-  Serial.print(temperature);
-  Serial.println(" °C");
+    snprintf(sensor_data_buff,128,"AT+SENDB=%d,%d,%d,%02X%02X%02X%02X",0,2,4,(short)(DHT11_temp*100)>>8 & 0xFF,(short)(DHT11_temp*100) & 0xFF,(short)(DHT11_hum*100)>>8 & 0xFF,(short)(DHT11_hum*100) & 0xFF);
+    
+    ss.println(sensor_data_buff);
+  }
 
-  Serial.print("Humidity: ");
-  Serial.print(humidity);
-  Serial.println(" g.m-3");
- ThingSpeak.setField(TemperatureField, temperature);
- ThingSpeak.setField(HumidityField, humidity);
-    ThingSpeak.writeFields(myChannelField,myWriteAPIKey);
-  delay(1000);
+  if(time_to_at_recvb==true){
+    time_to_at_recvb=false;
+    get_LA66_data_status=true;
+    delay(1000);
+    
+    ss.println("AT+CFG");    
+  }
+
+    while ( ss.available()) {
+    // get the new byte:
+    char inChar = (char) ss.read();
+    // add it to the inputString:
+    inputString += inChar;
+
+    rxbuff[rxbuff_index++]=inChar;
+
+    if(rxbuff_index>128)
+    break;
+    
+    // if the incoming character is a newline, set a flag so the main loop can
+    // do something about it:
+    if (inChar == '\n' || inChar == '\r') {
+      stringComplete = true;
+      rxbuff[rxbuff_index]='\0';
+       
+      if(strncmp(rxbuff,"JOINED",6)==0){
+        network_joined_status=1;
+      }
+
+      if(strncmp(rxbuff,"Dragino LA66 Device",19)==0){
+        network_joined_status=0;
+      }
+
+      if(strncmp(rxbuff,"Run AT+RECVB=? to see detail",28)==0){
+        time_to_at_recvb=true;
+        stringComplete=false;
+        inputString = "\0";
+      }
+
+      if(strncmp(rxbuff,"AT+RECVB=",9)==0){       
+        stringComplete=false;
+        inputString = "\0";
+        Serial.print("\r\nGet downlink data(FPort & Payload) ");
+        Serial.println(&rxbuff[9]);
+      }
+      
+      rxbuff_index=0;
+
+      if(get_LA66_data_status==true){
+        stringComplete=false;
+        inputString = "\0";
+      }
+    }
+  }
+
+   while ( Serial.available()) {
+    // get the new byte:
+    char inChar = (char) Serial.read();
+    // add it to the inputString:
+    inputString += inChar;
+    // if the incoming character is a newline, set a flag so the main loop can
+    // do something about it:
+    if (inChar == '\n' || inChar == '\r') {
+      ss.print(inputString);
+      inputString = "\0";
+    }
+  }
+  
+  // print the string when a newline arrives:
+  if (stringComplete) {
+    Serial.print(inputString);
+    
+    // clear the string:
+    inputString = "\0";
+    stringComplete = false;
+  }
 }
-~~~
+
+
+
+/*function Decoder(bytes,port){
+var Temperature=(bytes[0] << 8 | bytes[1])/100;
+var Humidity=(bytes[2] << 8 | bytes[3])/100;
+return{
+Temperature:Temperature,
+Humidity:Humidity
+};
+}*/
+```
+
 # CIRCUIT DIAGRAM:
-<img width="1711" height="767" alt="image" src="https://github.com/user-attachments/assets/bba84fea-5cbd-4852-a4d3-66af89c4c024" />
+
+![WhatsApp Image 2025-11-14 at 11 33 42_6dca2979](https://github.com/user-attachments/assets/aafb82e3-8138-48df-9405-30a1d2646f38)
+
 
 # OUTPUT:
-<img width="1477" height="825" alt="image" src="https://github.com/user-attachments/assets/ce6b0009-66db-4637-9e9a-24ae353a4f4a" />
-<img width="1469" height="824" alt="image" src="https://github.com/user-attachments/assets/7c6d4449-0be9-4b65-aaf3-dbe1705fac6f" />
+
+<img width="1903" height="954" alt="Screenshot 2025-11-13 094928" src="https://github.com/user-attachments/assets/94086746-3999-4b93-8b50-d0a268370b53" />
+
+<img width="1919" height="1009" alt="Screenshot 2025-11-13 094947" src="https://github.com/user-attachments/assets/9e6f4254-24b3-4054-8955-0dd2cd5083a1" />
+
+<img width="1917" height="967" alt="Screenshot 2025-11-13 094817" src="https://github.com/user-attachments/assets/2894292c-bd25-4ecc-9dca-cbd963d62f3d" />
+
 
 # RESULT:
 
